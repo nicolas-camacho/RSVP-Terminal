@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -15,13 +16,101 @@ import (
 	"golang.org/x/net/html"
 )
 
+// Pause multipliers applied to the last word before each boundary.
+const (
+	factorClause    = 1.5 // after , ; :
+	factorSentence  = 2.5 // after . ! ? …
+	factorParagraph = 3.5 // after paragraph / section break
+)
+
+// ── pause factors ─────────────────────────────────────────────────────────────
+
+// computePauseFactors converts a raw word slice (where "" marks a paragraph
+// break) into clean words and a per-word pause multiplier.
+// The multiplier for word i controls how long it stays on screen.
+func computePauseFactors(raw []string) (words []string, factors []float64) {
+	for _, w := range raw {
+		if w == "" {
+			// Upgrade the previous word's factor to paragraph level.
+			if len(factors) > 0 && factors[len(factors)-1] < factorParagraph {
+				factors[len(factors)-1] = factorParagraph
+			}
+			continue
+		}
+		words = append(words, w)
+		factors = append(factors, punctuationFactor(w))
+	}
+	return
+}
+
+func countWords(raw []string) int {
+	n := 0
+	for _, w := range raw {
+		if w != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// punctuationFactor returns the pause multiplier implied by a word's trailing
+// punctuation. Closing quotes/brackets are skipped to reach the real mark.
+func punctuationFactor(word string) float64 {
+	runes := []rune(word)
+	for i := len(runes) - 1; i >= 0; i-- {
+		switch runes[i] {
+		case '.', '!', '?', '…':
+			return factorSentence
+		case ',', ';', ':':
+			return factorClause
+		case '"', '\'', ')', ']', '”', '’', '»':
+			continue // skip closing punctuation and look further left
+		default:
+			return 1.0
+		}
+	}
+	return 1.0
+}
+
+// ── TXT ───────────────────────────────────────────────────────────────────────
+
+func loadTxt(filePath string) ([]string, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return paragraphsToWords(text), nil
+}
+
+// paragraphsToWords splits text on double (or more) newlines and inserts ""
+// paragraph sentinels between non-empty paragraphs.
+func paragraphsToWords(text string) []string {
+	// Collapse 3+ newlines → 2.
+	for strings.Contains(text, "\n\n\n") {
+		text = strings.ReplaceAll(text, "\n\n\n", "\n\n")
+	}
+	parts := strings.Split(text, "\n\n")
+
+	var raw []string
+	first := true
+	for _, p := range parts {
+		ws := strings.Fields(p)
+		if len(ws) == 0 {
+			continue
+		}
+		if !first {
+			raw = append(raw, "") // paragraph sentinel
+		}
+		raw = append(raw, ws...)
+		first = false
+	}
+	return raw
+}
+
 // ── PDF ───────────────────────────────────────────────────────────────────────
 
-// parsePDF extracts words from a PDF by reconstructing spaces from the
-// positional data of each text item on the page. GetPlainText() omits gaps
-// between items so words get concatenated; this approach inserts a space
-// whenever the horizontal gap between two consecutive items on the same line
-// is wider than ~15% of the font size.
 func parsePDF(filePath string) ([]string, error) {
 	f, r, err := pdf.Open(filePath)
 	if err != nil {
@@ -29,7 +118,7 @@ func parsePDF(filePath string) ([]string, error) {
 	}
 	defer f.Close()
 
-	var sb strings.Builder
+	var raw []string
 
 	for pageNum := 1; pageNum <= r.NumPage(); pageNum++ {
 		page := r.Page(pageNum)
@@ -43,7 +132,6 @@ func parsePDF(filePath string) ([]string, error) {
 		}
 
 		// Sort top→bottom (Y desc), then left→right (X asc).
-		// Tolerance of 2pt to treat items at the same Y as one line.
 		sort.Slice(texts, func(i, j int) bool {
 			if math.Abs(texts[i].Y-texts[j].Y) > 2 {
 				return texts[i].Y > texts[j].Y
@@ -51,23 +139,30 @@ func parsePDF(filePath string) ([]string, error) {
 			return texts[i].X < texts[j].X
 		})
 
+		var sb strings.Builder
 		prevY := texts[0].Y
-		prevRight := 0.0 // X + W of the last written item
+		prevRight := 0.0
 
 		for _, t := range texts {
 			if t.S == "" {
 				continue
 			}
 
-			newLine := math.Abs(t.Y-prevY) > t.FontSize*0.5
-			if newLine {
+			yDiff := prevY - t.Y // positive = moved down
+			newLine := yDiff > t.FontSize*0.5
+			paragraphBreak := yDiff > t.FontSize*2.5
+
+			if paragraphBreak {
+				sb.WriteString("\n\n")
+				prevRight = 0
+				prevY = t.Y
+			} else if newLine {
 				sb.WriteByte('\n')
 				prevRight = 0
 				prevY = t.Y
 			}
 
-			// Insert space when the gap between items is visibly non-zero.
-			if !newLine && prevRight > 0 && t.X-prevRight > t.FontSize*0.15 {
+			if prevRight > 0 && t.X-prevRight > t.FontSize*0.15 {
 				sb.WriteByte(' ')
 			}
 
@@ -76,14 +171,14 @@ func parsePDF(filePath string) ([]string, error) {
 			prevY = t.Y
 		}
 
-		sb.WriteByte('\n')
+		raw = append(raw, paragraphsToWords(sb.String())...)
+		raw = append(raw, "") // page boundary = paragraph break
 	}
 
-	words := strings.Fields(sb.String())
-	if len(words) == 0 {
+	if countWords(raw) == 0 {
 		return nil, fmt.Errorf("no se encontró texto en el PDF")
 	}
-	return words, nil
+	return raw, nil
 }
 
 // ── EPUB ──────────────────────────────────────────────────────────────────────
@@ -113,7 +208,6 @@ func parseEPUB(filePath string) ([]string, error) {
 		return io.ReadAll(rc)
 	}
 
-	// 1. container.xml → OPF path
 	containerData, err := readZipFile("META-INF/container.xml")
 	if err != nil {
 		return nil, fmt.Errorf("EPUB inválido: %w", err)
@@ -137,7 +231,6 @@ func parseEPUB(filePath string) ([]string, error) {
 		opfDir = ""
 	}
 
-	// 2. OPF → manifest + spine
 	opfData, err := readZipFile(opfPath)
 	if err != nil {
 		return nil, fmt.Errorf("OPF no encontrado (%s): %w", opfPath, err)
@@ -161,7 +254,6 @@ func parseEPUB(filePath string) ([]string, error) {
 		return nil, fmt.Errorf("error leyendo OPF: %w", err)
 	}
 
-	// id → zip path
 	manifest := make(map[string]string)
 	for _, item := range opf.Manifest.Items {
 		mt := strings.ToLower(item.MediaType)
@@ -176,8 +268,7 @@ func parseEPUB(filePath string) ([]string, error) {
 		}
 	}
 
-	// 3. Spine order → extract text
-	var words []string
+	var raw []string
 	for _, ref := range opf.Spine.Itemrefs {
 		zipPath, ok := manifest[ref.IDRef]
 		if !ok {
@@ -187,16 +278,24 @@ func parseEPUB(filePath string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		words = append(words, strings.Fields(extractHTMLText(data))...)
+		text := extractHTMLText(data)
+		chunk := paragraphsToWords(text)
+		if len(chunk) > 0 {
+			if len(raw) > 0 {
+				raw = append(raw, "") // chapter boundary
+			}
+			raw = append(raw, chunk...)
+		}
 	}
 
-	if len(words) == 0 {
+	if countWords(raw) == 0 {
 		return nil, fmt.Errorf("no se encontró texto en el EPUB")
 	}
-	return words, nil
+	return raw, nil
 }
 
-// extractHTMLText walks an HTML parse tree and collects visible text.
+// extractHTMLText walks the HTML tree collecting visible text.
+// Block-level elements emit "\n\n" to mark paragraph boundaries.
 func extractHTMLText(data []byte) string {
 	doc, err := html.Parse(bytes.NewReader(data))
 	if err != nil {
@@ -210,6 +309,9 @@ func extractHTMLText(data []byte) string {
 			switch n.Data {
 			case "script", "style", "head":
 				return
+			case "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+				"li", "tr", "blockquote", "br":
+				sb.WriteString("\n\n")
 			}
 		}
 		if n.Type == html.TextNode {

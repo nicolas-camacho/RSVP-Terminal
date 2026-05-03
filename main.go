@@ -45,25 +45,27 @@ func orpIndex(word string) int {
 type tickMsg struct{}
 
 type wordsLoadedMsg struct {
-	words []string
-	err   error
+	words        []string
+	pauseFactors []float64
+	err          error
 }
 
 func loadWordsCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		if isCacheable(path) {
-			if words, ok := loadFromCache(path); ok {
-				return wordsLoadedMsg{words: words}
+			if words, factors, ok := loadFromCache(path); ok {
+				return wordsLoadedMsg{words: words, pauseFactors: factors}
 			}
 		}
-		words, err := loadWords(path)
+		raw, err := loadWords(path)
 		if err != nil {
 			return wordsLoadedMsg{err: err}
 		}
+		words, factors := computePauseFactors(raw)
 		if isCacheable(path) {
-			saveToCache(path, words)
+			saveToCache(path, words, factors)
 		}
-		return wordsLoadedMsg{words: words}
+		return wordsLoadedMsg{words: words, pauseFactors: factors}
 	}
 }
 
@@ -73,29 +75,31 @@ type model struct {
 	bookProgress map[string]int
 	bookPath     string
 
-	words     []string
-	index     int
-	navCursor int
-	prevState appState
+	words        []string
+	pauseFactors []float64
+	index        int
+	navCursor    int
+	prevState    appState
 
 	spinner       spinner.Model
 	wpm           int
 	fontSize      int
-	longWordBonus int // extra % delay for words with 9+ characters
+	longWordBonus int
 	paused        bool
 	state         appState
 	width         int
 	height        int
 }
 
-// wordDelay returns the display duration for a word, adding longWordBonus %
-// extra time for words with 9 or more characters.
-func wordDelay(wpm, bonusPct int, word string) time.Duration {
+// wordDelay returns the display duration for a word.
+// pauseFactor is the punctuation/paragraph multiplier (1.0 = normal).
+// longWordBonus adds extra % time for words with 9+ characters.
+func wordDelay(wpm, longWordBonus int, word string, pauseFactor float64) time.Duration {
 	base := time.Minute / time.Duration(wpm)
-	if bonusPct > 0 && len([]rune(word)) >= 9 {
-		return base + base*time.Duration(bonusPct)/100
+	if longWordBonus > 0 && len([]rune(word)) >= 9 {
+		base += base * time.Duration(longWordBonus) / 100
 	}
-	return base
+	return time.Duration(float64(base) * pauseFactor)
 }
 
 func nextTick(wpm int) tea.Cmd {
@@ -104,8 +108,12 @@ func nextTick(wpm int) tea.Cmd {
 	})
 }
 
-func nextWordTick(wpm, bonusPct int, word string) tea.Cmd {
-	return tea.Tick(wordDelay(wpm, bonusPct, word), func(time.Time) tea.Msg {
+func nextWordTick(m model) tea.Cmd {
+	factor := 1.0
+	if m.index < len(m.pauseFactors) {
+		factor = m.pauseFactors[m.index]
+	}
+	return tea.Tick(wordDelay(m.wpm, m.longWordBonus, m.words[m.index], factor), func(time.Time) tea.Msg {
 		return tickMsg{}
 	})
 }
@@ -120,8 +128,6 @@ func clamp(v, lo, hi int) int {
 	return v
 }
 
-// wrapWords wraps word indices into lines of at most lineWidth visible chars.
-// Returns lines (each = list of word indices) and wordToLine mapping.
 func wrapWords(words []string, lineWidth int) (lines [][]int, wordToLine []int) {
 	wordToLine = make([]int, len(words))
 	lineNum := 0
@@ -195,6 +201,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.words = msg.words
+		m.pauseFactors = msg.pauseFactors
 		m.index = m.bookProgress[m.bookPath]
 		m.navCursor = m.index
 		m.prevState = stateFilePicker
@@ -214,7 +221,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateDone
 			return m, nil
 		}
-		return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
+		return m, nextWordTick(m)
 
 	case tea.KeyMsg:
 		switch m.state {
@@ -256,14 +263,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				if m.prevState == stateReading {
 					m.state = stateReading
-					return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
+					return m, nextWordTick(m)
 				}
 				m.state = m.prevState
 			case "enter", "s", "S":
 				m.index = m.navCursor
 				if m.prevState == stateReading {
 					m.state = stateReading
-					return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
+					return m, nextWordTick(m)
 				}
 				m.state = stateReady
 			case "left", "h":
@@ -316,7 +323,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateNavigator
 			case "s", "S":
 				m.state = stateReading
-				return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
+				return m, nextWordTick(m)
 			case "+", "=":
 				m.wpm += 25
 			case "-":
@@ -355,14 +362,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.wpm > 50 {
 					m.wpm -= 25
 				}
-			case "left":
-				if m.index > 0 {
-					m.index--
-				}
-			case "right":
-				if m.index < len(m.words)-1 {
-					m.index++
-				}
 			case ".":
 				if m.longWordBonus < 50 {
 					m.longWordBonus += 5
@@ -370,6 +369,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case ",":
 				if m.longWordBonus > 0 {
 					m.longWordBonus -= 5
+				}
+			case "left":
+				if m.index > 0 {
+					m.index--
+				}
+			case "right":
+				if m.index < len(m.words)-1 {
+					m.index++
 				}
 			case "n":
 				m.bookProgress[m.bookPath] = m.index
@@ -452,7 +459,7 @@ func padRight(s string, w int) string {
 
 func displayName(path string) string {
 	base := filepath.Base(path)
-	name := strings.TrimSuffix(base, ".txt")
+	name := strings.TrimSuffix(base, filepath.Ext(base))
 	return strings.ReplaceAll(name, "_", " ")
 }
 
@@ -588,12 +595,10 @@ func (m model) viewNavigator() string {
 
 	navLines, wordToLine := wrapWords(m.words, lineWidth)
 
-	// Scroll: keep cursor centered in viewport
 	cursorLine := wordToLine[m.navCursor]
 	scroll := cursorLine - viewH/2
 	scroll = clamp(scroll, 0, clamp(len(navLines)-viewH, 0, len(navLines)))
 
-	// ── header ──
 	name := titleStyle.Render(displayName(m.bookPath))
 	pos := infoStyle.Render(fmt.Sprintf("palabra %d / %d", m.navCursor+1, len(m.words)))
 	gap := clamp(m.width-lipgloss.Width(name)-lipgloss.Width(pos), 1, m.width)
@@ -603,7 +608,6 @@ func (m model) viewNavigator() string {
 	var out []string
 	out = append(out, header, separator)
 
-	// ── text body ──
 	pad := strings.Repeat(" ", hPad)
 	endLine := clamp(scroll+viewH, 0, len(navLines))
 	for li := scroll; li < endLine; li++ {
@@ -622,12 +626,10 @@ func (m model) viewNavigator() string {
 		out = append(out, pad+strings.Join(parts, " "))
 	}
 
-	// Pad remaining viewport rows
 	for len(out) < headerH+viewH {
 		out = append(out, "")
 	}
 
-	// ── footer ──
 	var hint string
 	if m.prevState == stateReading {
 		hint = "←→:palabra  ↑↓:línea  g/G:inicio/fin  Enter:saltar aquí  Esc:reanudar"
@@ -787,6 +789,8 @@ func (m model) View() string {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+// loadWords returns raw words (may contain "" paragraph sentinels).
+// Callers must run computePauseFactors to get clean words + factors.
 func loadWords(filePath string) ([]string, error) {
 	switch strings.ToLower(filepath.Ext(filePath)) {
 	case ".pdf":
@@ -794,15 +798,14 @@ func loadWords(filePath string) ([]string, error) {
 	case ".epub":
 		return parseEPUB(filePath)
 	default:
-		data, err := os.ReadFile(filePath)
+		raw, err := loadTxt(filePath)
 		if err != nil {
 			return nil, err
 		}
-		words := strings.Fields(string(data))
-		if len(words) == 0 {
+		if countWords(raw) == 0 {
 			return nil, fmt.Errorf("archivo vacío")
 		}
-		return words, nil
+		return raw, nil
 	}
 }
 
@@ -827,7 +830,7 @@ func scanBooks(dir string) ([]string, error) {
 func main() {
 	books, err := scanBooks("books")
 	if err != nil || len(books) == 0 {
-		fmt.Fprintln(os.Stderr, "No se encontraron archivos .txt en la carpeta 'books/'")
+		fmt.Fprintln(os.Stderr, "No se encontraron archivos .txt/.pdf/.epub en la carpeta 'books/'")
 		os.Exit(1)
 	}
 
