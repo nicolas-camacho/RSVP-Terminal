@@ -87,6 +87,7 @@ Shown before starting. Adjustable while in this screen:
 |-----|--------|
 | `+` / `-` | ±25 WPM |
 | `]` / `[` | font size 1–5 (letter spacing) |
+| `.` / `,` | long word pause bonus ±5% (default 5%) |
 | `s` | start reading |
 | `n` | open text navigator |
 | `Esc` | back to book selector |
@@ -97,11 +98,15 @@ Shown before starting. Adjustable while in this screen:
 |-----|--------|
 | `Space` | pause / resume |
 | `+` / `-` | adjust WPM on the fly |
+| `.` / `,` | adjust long word bonus on the fly |
 | `←` / `→` | step back / forward one word |
 | `n` | open text navigator (saves progress) |
 | `r` | back to config (same book) |
 | `Esc` | back to book selector (saves progress) |
 | `q` | quit (saves progress) |
+
+### Long word pause bonus
+Words with 9 or more characters are displayed for slightly longer to give the eye more time to process them. The bonus is a percentage of the base word duration and is adjustable from 0% to 50% in steps of 5%. At 300 WPM (200 ms base), a 5% bonus adds 10 ms to each long word.
 
 ### Progress persistence
 Reading position is saved automatically to `books/.progress` when:

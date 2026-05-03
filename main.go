@@ -78,17 +78,34 @@ type model struct {
 	navCursor int
 	prevState appState
 
-	spinner  spinner.Model
-	wpm      int
-	fontSize int
-	paused   bool
-	state    appState
-	width    int
-	height   int
+	spinner       spinner.Model
+	wpm           int
+	fontSize      int
+	longWordBonus int // extra % delay for words with 9+ characters
+	paused        bool
+	state         appState
+	width         int
+	height        int
+}
+
+// wordDelay returns the display duration for a word, adding longWordBonus %
+// extra time for words with 9 or more characters.
+func wordDelay(wpm, bonusPct int, word string) time.Duration {
+	base := time.Minute / time.Duration(wpm)
+	if bonusPct > 0 && len([]rune(word)) >= 9 {
+		return base + base*time.Duration(bonusPct)/100
+	}
+	return base
 }
 
 func nextTick(wpm int) tea.Cmd {
 	return tea.Tick(time.Minute/time.Duration(wpm), func(time.Time) tea.Msg {
+		return tickMsg{}
+	})
+}
+
+func nextWordTick(wpm, bonusPct int, word string) tea.Cmd {
+	return tea.Tick(wordDelay(wpm, bonusPct, word), func(time.Time) tea.Msg {
 		return tickMsg{}
 	})
 }
@@ -197,7 +214,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateDone
 			return m, nil
 		}
-		return m, nextTick(m.wpm)
+		return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
 
 	case tea.KeyMsg:
 		switch m.state {
@@ -239,14 +256,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				if m.prevState == stateReading {
 					m.state = stateReading
-					return m, nextTick(m.wpm)
+					return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
 				}
 				m.state = m.prevState
 			case "enter", "s", "S":
 				m.index = m.navCursor
 				if m.prevState == stateReading {
 					m.state = stateReading
-					return m, nextTick(m.wpm)
+					return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
 				}
 				m.state = stateReady
 			case "left", "h":
@@ -299,7 +316,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateNavigator
 			case "s", "S":
 				m.state = stateReading
-				return m, nextTick(m.wpm)
+				return m, nextWordTick(m.wpm, m.longWordBonus, m.words[m.index])
 			case "+", "=":
 				m.wpm += 25
 			case "-":
@@ -313,6 +330,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "[":
 				if m.fontSize > 1 {
 					m.fontSize--
+				}
+			case ".":
+				if m.longWordBonus < 50 {
+					m.longWordBonus += 5
+				}
+			case ",":
+				if m.longWordBonus > 0 {
+					m.longWordBonus -= 5
 				}
 			}
 
@@ -337,6 +362,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "right":
 				if m.index < len(m.words)-1 {
 					m.index++
+				}
+			case ".":
+				if m.longWordBonus < 50 {
+					m.longWordBonus += 5
+				}
+			case ",":
+				if m.longWordBonus > 0 {
+					m.longWordBonus -= 5
 				}
 			case "n":
 				m.bookProgress[m.bookPath] = m.index
@@ -621,6 +654,10 @@ func (m model) viewReady() string {
 		"  " + valueStyle.Render(padRight(fmt.Sprintf("%d / 5", m.fontSize), 9)) +
 		dimStyle.Render("  [ [ ]  [ ] ]")
 
+	bonusRow := "  " + labelStyle.Render(padRight("Pausa en largas:", 16)) +
+		"  " + valueStyle.Render(padRight(fmt.Sprintf("%d %%", m.longWordBonus), 9)) +
+		dimStyle.Render("  [ , ]  [ . ]")
+
 	const previewWord = "ejemplo"
 	spacing := m.fontSize - 1
 	runes := []rune(previewWord)
@@ -646,6 +683,8 @@ func (m model) viewReady() string {
 		wpmRow,
 		"",
 		sizeRow,
+		"",
+		bonusRow,
 		"",
 		div,
 		"",
@@ -710,7 +749,7 @@ func (m model) viewReading() string {
 	} else {
 		left = infoStyle.Render(fmt.Sprintf("▶ %d WPM  %d/%d", m.wpm, m.index+1, len(m.words)))
 	}
-	right := infoStyle.Render("space:pausa  ±:vel  ←→:nav  n:texto  r:config  esc:libro  q:salir")
+	right := infoStyle.Render("space:pausa  ±:vel  ,/.:largas  ←→:nav  n:texto  r:config  q:salir")
 	gap := clamp(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1, m.width)
 	lines[m.height-1] = left + strings.Repeat(" ", gap) + right
 
@@ -794,11 +833,12 @@ func main() {
 
 	p := tea.NewProgram(
 		model{
-			bookFiles:    books,
-			bookProgress: loadProgress(),
-			wpm:          300,
-			fontSize:     1,
-			state:        stateFilePicker,
+			bookFiles:     books,
+			bookProgress:  loadProgress(),
+			wpm:           300,
+			fontSize:      1,
+			longWordBonus: 5,
+			state:         stateFilePicker,
 		},
 		tea.WithAltScreen(),
 	)
