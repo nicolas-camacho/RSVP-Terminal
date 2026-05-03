@@ -1,0 +1,10 @@
+# binary
+rsvp-terminal
+rsvp-terminal.exe
+
+# books — ignore all texts except the sample
+books/*.txt
+!books/file.txt
+
+# reading progress
+books/.progress
