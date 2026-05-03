@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -16,6 +17,7 @@ type appState int
 
 const (
 	stateFilePicker appState = iota
+	stateLoading
 	stateNavigator
 	stateReady
 	stateReading
@@ -42,6 +44,29 @@ func orpIndex(word string) int {
 
 type tickMsg struct{}
 
+type wordsLoadedMsg struct {
+	words []string
+	err   error
+}
+
+func loadWordsCmd(path string) tea.Cmd {
+	return func() tea.Msg {
+		if isCacheable(path) {
+			if words, ok := loadFromCache(path); ok {
+				return wordsLoadedMsg{words: words}
+			}
+		}
+		words, err := loadWords(path)
+		if err != nil {
+			return wordsLoadedMsg{err: err}
+		}
+		if isCacheable(path) {
+			saveToCache(path, words)
+		}
+		return wordsLoadedMsg{words: words}
+	}
+}
+
 type model struct {
 	bookFiles    []string
 	bookCursor   int
@@ -53,6 +78,7 @@ type model struct {
 	navCursor int
 	prevState appState
 
+	spinner  spinner.Model
 	wpm      int
 	fontSize int
 	paused   bool
@@ -139,6 +165,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
+	case spinner.TickMsg:
+		if m.state == stateLoading {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
+	case wordsLoadedMsg:
+		if msg.err != nil {
+			m.state = stateFilePicker
+			return m, nil
+		}
+		m.words = msg.words
+		m.index = m.bookProgress[m.bookPath]
+		m.navCursor = m.index
+		m.prevState = stateFilePicker
+		m.state = stateNavigator
+
 	case tickMsg:
 		if m.state != stateReading {
 			return m, nil
@@ -171,16 +215,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.bookCursor++
 				}
 			case "enter", " ":
-				words, err := loadWords(m.bookFiles[m.bookCursor])
-				if err != nil {
-					return m, nil
-				}
-				m.words = words
 				m.bookPath = m.bookFiles[m.bookCursor]
-				m.index = m.bookProgress[m.bookPath]
-				m.navCursor = m.index
-				m.prevState = stateFilePicker
-				m.state = stateNavigator
+				m.spinner = spinner.New()
+				m.spinner.Spinner = spinner.Points
+				m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#9B59F5"))
+				m.state = stateLoading
+				return m, tea.Batch(m.spinner.Tick, loadWordsCmd(m.bookPath))
+			}
+
+		case stateLoading:
+			if msg.String() == "ctrl+c" || msg.String() == "q" {
+				return m, tea.Quit
 			}
 
 		case stateNavigator:
@@ -405,6 +450,46 @@ func renderWordSpaced(word string, spacing, centerX int) string {
 
 // ── views ─────────────────────────────────────────────────────────────────────
 
+func (m model) viewLoading() string {
+	if m.width == 0 || m.height == 0 {
+		return ""
+	}
+
+	name := displayName(m.bookPath)
+	ext := strings.ToUpper(strings.TrimPrefix(filepath.Ext(m.bookPath), "."))
+
+	const innerW = 42
+	div := dimStyle.Render(strings.Repeat("─", innerW))
+
+	content := strings.Join([]string{
+		"",
+		centerLine(titleStyle.Render("RSVP  Terminal"), innerW),
+		"",
+		div,
+		"",
+		centerLine(m.spinner.View()+"  "+valueStyle.Render(name), innerW),
+		centerLine(dimStyle.Render("Procesando "+ext+"..."), innerW),
+		"",
+		div,
+		"",
+	}, "\n")
+
+	box := panelStyle.Render(content)
+	boxLines := strings.Split(box, "\n")
+	topPad := clamp((m.height-len(boxLines))/2, 0, m.height)
+	leftPad := clamp((m.width-lipgloss.Width(box))/2, 0, m.width)
+	leftStr := strings.Repeat(" ", leftPad)
+
+	var out []string
+	for i := 0; i < topPad; i++ {
+		out = append(out, "")
+	}
+	for _, l := range boxLines {
+		out = append(out, leftStr+l)
+	}
+	return strings.Join(out, "\n")
+}
+
 func (m model) viewFilePicker() string {
 	if m.width == 0 || m.height == 0 {
 		return ""
@@ -415,17 +500,9 @@ func (m model) viewFilePicker() string {
 	var items []string
 	for i, f := range m.bookFiles {
 		name := displayName(f)
-		saved := m.bookProgress[f]
 		suffix := ""
-		if saved > 0 {
-			pct := saved * 100 / len(m.words)
-			if f == m.bookPath {
-				pct = saved * 100 / len(m.words)
-			} else {
-				// approximate — we don't have word count for unloaded books
-				suffix = dimStyle.Render("  ·  progreso guardado")
-			}
-			_ = pct
+		if m.bookProgress[f] > 0 {
+			suffix = dimStyle.Render("  ·  progreso guardado")
 		}
 		if i == m.bookCursor {
 			items = append(items, "  "+selectedItemStyle.Render("▶  "+name)+suffix)
@@ -655,6 +732,8 @@ func (m model) View() string {
 	switch m.state {
 	case stateFilePicker:
 		return m.viewFilePicker()
+	case stateLoading:
+		return m.viewLoading()
 	case stateNavigator:
 		return m.viewNavigator()
 	case stateReady:
@@ -669,16 +748,23 @@ func (m model) View() string {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
-func loadWords(path string) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+func loadWords(filePath string) ([]string, error) {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".pdf":
+		return parsePDF(filePath)
+	case ".epub":
+		return parseEPUB(filePath)
+	default:
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		words := strings.Fields(string(data))
+		if len(words) == 0 {
+			return nil, fmt.Errorf("archivo vacío")
+		}
+		return words, nil
 	}
-	words := strings.Fields(string(data))
-	if len(words) == 0 {
-		return nil, fmt.Errorf("archivo vacío")
-	}
-	return words, nil
 }
 
 func scanBooks(dir string) ([]string, error) {
@@ -688,7 +774,11 @@ func scanBooks(dir string) ([]string, error) {
 	}
 	var files []string
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".txt") {
+		if e.IsDir() {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(e.Name())) {
+		case ".txt", ".pdf", ".epub":
 			files = append(files, filepath.Join(dir, e.Name()))
 		}
 	}

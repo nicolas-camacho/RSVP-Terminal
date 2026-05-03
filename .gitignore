@@ -8,3 +8,6 @@ books/*.txt
 
 # reading progress
 books/.progress
+
+# parsed word cache
+books/.cache/

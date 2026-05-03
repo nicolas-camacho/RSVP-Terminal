@@ -37,23 +37,34 @@ go build -o rsvp-terminal
 
 ```
 rsvp-terminal/
-├── main.go          # all application logic
+├── main.go          # TUI logic, state machine, views
+├── parsers.go       # PDF, EPUB, and TXT text extraction
+├── cache.go         # word cache for PDF/EPUB (gob, keyed by mod time)
 ├── books/
-│   ├── file.txt     # sample text (committed)
-│   └── .progress    # saved reading positions per book (gitignored)
+│   ├── file.txt         # sample text (committed)
+│   ├── .progress        # saved reading positions per book (gitignored)
+│   └── .cache/          # parsed word cache for PDF/EPUB files (gitignored)
+│       └── <file>.gob
 ├── go.mod
 ├── go.sum
 └── README.md
 ```
 
-Add any `.txt` file to the `books/` folder and it will appear in the book selector automatically.
+Add any `.txt`, `.pdf`, or `.epub` file to the `books/` folder and it will appear in the book selector automatically.
 
 ## Features
 
 ### Book selector
-- Lists all `.txt` files in the `books/` directory
+- Lists all `.txt`, `.pdf`, and `.epub` files in the `books/` directory
 - Books with saved progress show a "progreso guardado" indicator
 - Navigate with `↑` / `↓`, confirm with `Enter`
+
+### Loading screen
+PDF and EPUB files are parsed on first open and cached for instant subsequent loads. A spinner is shown while processing.
+
+- **First open:** parses the file, saves a word cache to `books/.cache/<filename>.gob`
+- **Subsequent opens:** loads from cache instantly
+- **File changed:** mod time mismatch triggers a re-parse and cache update
 
 ### Text navigator
 - Opens after selecting a book, or press `n` during reading
