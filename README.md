@@ -77,8 +77,12 @@ PDF and EPUB files are parsed on first open and cached for instant subsequent lo
 | `←` `→` | move word by word |
 | `↑` `↓` | move line by line |
 | `g` / `G` | jump to start / end |
-| `Enter` | start reading from cursor position |
-| `Esc` | go back (resumes reading if opened mid-read) |
+| `/` | enter search — type to find first match |
+| `Enter` | start reading from cursor (confirm search if searching) |
+| `Esc` | go back / cancel search |
+
+#### Search
+Press `/` to enter search mode. The cursor jumps to the first word containing the query as you type (case-insensitive, wraps around). `Enter` confirms and stays at the match. `Esc` cancels and restores the original cursor position.
 
 ### Config screen
 Shown before starting. Adjustable while in this screen:
@@ -93,6 +97,8 @@ Shown before starting. Adjustable while in this screen:
 | `Esc` | back to book selector |
 
 ### Reading screen
+
+The status bar shows current WPM, word position, and estimated time remaining (e.g. `~8min` or `~45s`), updated live as WPM changes.
 
 | Key | Action |
 |-----|--------|

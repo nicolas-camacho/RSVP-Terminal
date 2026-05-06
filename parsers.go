@@ -114,7 +114,7 @@ func paragraphsToWords(text string) []string {
 func parsePDF(filePath string) ([]string, error) {
 	f, r, err := pdf.Open(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("no se pudo abrir el PDF: %w", err)
+		return nil, fmt.Errorf("could not open PDF: %w", err)
 	}
 	defer f.Close()
 
@@ -176,7 +176,7 @@ func parsePDF(filePath string) ([]string, error) {
 	}
 
 	if countWords(raw) == 0 {
-		return nil, fmt.Errorf("no se encontró texto en el PDF")
+		return nil, fmt.Errorf("no text found in PDF")
 	}
 	return raw, nil
 }
@@ -186,7 +186,7 @@ func parsePDF(filePath string) ([]string, error) {
 func parseEPUB(filePath string) ([]string, error) {
 	zr, err := zip.OpenReader(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("no se pudo abrir el EPUB: %w", err)
+		return nil, fmt.Errorf("could not open EPUB: %w", err)
 	}
 	defer zr.Close()
 
@@ -198,7 +198,7 @@ func parseEPUB(filePath string) ([]string, error) {
 	readZipFile := func(name string) ([]byte, error) {
 		f, ok := index[name]
 		if !ok {
-			return nil, fmt.Errorf("archivo no encontrado en EPUB: %s", name)
+			return nil, fmt.Errorf("file not found in EPUB: %s", name)
 		}
 		rc, err := f.Open()
 		if err != nil {
@@ -210,7 +210,7 @@ func parseEPUB(filePath string) ([]string, error) {
 
 	containerData, err := readZipFile("META-INF/container.xml")
 	if err != nil {
-		return nil, fmt.Errorf("EPUB inválido: %w", err)
+		return nil, fmt.Errorf("invalid EPUB: %w", err)
 	}
 
 	var container struct {
@@ -219,10 +219,10 @@ func parseEPUB(filePath string) ([]string, error) {
 		} `xml:"rootfiles>rootfile"`
 	}
 	if err := xml.Unmarshal(containerData, &container); err != nil {
-		return nil, fmt.Errorf("error leyendo container.xml: %w", err)
+		return nil, fmt.Errorf("error reading container.xml: %w", err)
 	}
 	if len(container.Rootfiles) == 0 {
-		return nil, fmt.Errorf("EPUB inválido: sin rootfile")
+		return nil, fmt.Errorf("invalid EPUB: no rootfile")
 	}
 
 	opfPath := container.Rootfiles[0].FullPath
@@ -233,7 +233,7 @@ func parseEPUB(filePath string) ([]string, error) {
 
 	opfData, err := readZipFile(opfPath)
 	if err != nil {
-		return nil, fmt.Errorf("OPF no encontrado (%s): %w", opfPath, err)
+		return nil, fmt.Errorf("OPF not found (%s): %w", opfPath, err)
 	}
 
 	var opf struct {
@@ -251,7 +251,7 @@ func parseEPUB(filePath string) ([]string, error) {
 		} `xml:"spine"`
 	}
 	if err := xml.Unmarshal(opfData, &opf); err != nil {
-		return nil, fmt.Errorf("error leyendo OPF: %w", err)
+		return nil, fmt.Errorf("error reading OPF: %w", err)
 	}
 
 	manifest := make(map[string]string)
@@ -289,7 +289,7 @@ func parseEPUB(filePath string) ([]string, error) {
 	}
 
 	if countWords(raw) == 0 {
-		return nil, fmt.Errorf("no se encontró texto en el EPUB")
+		return nil, fmt.Errorf("no text found in EPUB")
 	}
 	return raw, nil
 }

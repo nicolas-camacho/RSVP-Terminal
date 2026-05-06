@@ -81,6 +81,10 @@ type model struct {
 	navCursor    int
 	prevState    appState
 
+	navSearching  bool
+	navSearch     string
+	navSearchBase int
+
 	spinner       spinner.Model
 	wpm           int
 	fontSize      int
@@ -126,6 +130,26 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
+}
+
+// searchWords finds the first word containing query (case-insensitive),
+// starting at from and wrapping around. Returns from if no match.
+func searchWords(words []string, query string, from int) int {
+	if query == "" {
+		return from
+	}
+	lower := strings.ToLower(query)
+	for i := from; i < len(words); i++ {
+		if strings.Contains(strings.ToLower(words[i]), lower) {
+			return i
+		}
+	}
+	for i := 0; i < from; i++ {
+		if strings.Contains(strings.ToLower(words[i]), lower) {
+			return i
+		}
+	}
+	return from
 }
 
 func wrapWords(words []string, lineWidth int) (lines [][]int, wordToLine []int) {
@@ -256,6 +280,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			lineWidth := clamp(m.width-4, 10, m.width)
 			navLines, wordToLine := wrapWords(m.words, lineWidth)
 
+			if m.navSearching {
+				switch msg.String() {
+				case "ctrl+c":
+					saveProgress(m.bookProgress)
+					return m, tea.Quit
+				case "esc":
+					m.navSearching = false
+					m.navCursor = m.navSearchBase
+				case "enter":
+					m.navSearching = false
+				case "backspace":
+					runes := []rune(m.navSearch)
+					if len(runes) > 0 {
+						m.navSearch = string(runes[:len(runes)-1])
+					}
+					m.navCursor = searchWords(m.words, m.navSearch, m.navSearchBase)
+				default:
+					if len(msg.String()) == 1 {
+						m.navSearch += msg.String()
+						m.navCursor = searchWords(m.words, m.navSearch, m.navSearchBase)
+					}
+				}
+				_ = navLines
+				_ = wordToLine
+				return m, nil
+			}
+
 			switch msg.String() {
 			case "ctrl+c", "q":
 				saveProgress(m.bookProgress)
@@ -273,6 +324,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nextWordTick(m)
 				}
 				m.state = stateReady
+			case "/":
+				m.navSearching = true
+				m.navSearch = ""
+				m.navSearchBase = m.navCursor
 			case "left", "h":
 				if m.navCursor > 0 {
 					m.navCursor--
@@ -508,7 +563,7 @@ func (m model) viewLoading() string {
 		div,
 		"",
 		centerLine(m.spinner.View()+"  "+valueStyle.Render(name), innerW),
-		centerLine(dimStyle.Render("Procesando "+ext+"..."), innerW),
+		centerLine(dimStyle.Render("Processing "+ext+"..."), innerW),
 		"",
 		div,
 		"",
@@ -542,7 +597,7 @@ func (m model) viewFilePicker() string {
 		name := displayName(f)
 		suffix := ""
 		if m.bookProgress[f] > 0 {
-			suffix = dimStyle.Render("  ·  progreso guardado")
+			suffix = dimStyle.Render("  ·  progress saved")
 		}
 		if i == m.bookCursor {
 			items = append(items, "  "+selectedItemStyle.Render("▶  "+name)+suffix)
@@ -554,7 +609,7 @@ func (m model) viewFilePicker() string {
 	content := strings.Join([]string{
 		"",
 		centerLine(titleStyle.Render("RSVP  Terminal"), innerW),
-		centerLine(dimStyle.Render("Selecciona un libro"), innerW),
+		centerLine(dimStyle.Render("Select a book"), innerW),
 		"",
 		div,
 		"",
@@ -562,7 +617,7 @@ func (m model) viewFilePicker() string {
 		"",
 		div,
 		"",
-		centerLine(dimStyle.Render("↑↓: navegar   Enter: seleccionar   q: salir"), innerW),
+		centerLine(dimStyle.Render("↑↓: navigate   Enter: select   q: quit"), innerW),
 		"",
 	}, "\n")
 
@@ -600,7 +655,7 @@ func (m model) viewNavigator() string {
 	scroll = clamp(scroll, 0, clamp(len(navLines)-viewH, 0, len(navLines)))
 
 	name := titleStyle.Render(displayName(m.bookPath))
-	pos := infoStyle.Render(fmt.Sprintf("palabra %d / %d", m.navCursor+1, len(m.words)))
+	pos := infoStyle.Render(fmt.Sprintf("word %d / %d", m.navCursor+1, len(m.words)))
 	gap := clamp(m.width-lipgloss.Width(name)-lipgloss.Width(pos), 1, m.width)
 	header := name + strings.Repeat(" ", gap) + pos
 	separator := dimStyle.Render(strings.Repeat("─", m.width))
@@ -631,10 +686,18 @@ func (m model) viewNavigator() string {
 	}
 
 	var hint string
-	if m.prevState == stateReading {
-		hint = "←→:palabra  ↑↓:línea  g/G:inicio/fin  Enter:saltar aquí  Esc:reanudar"
+	if m.navSearching {
+		noMatch := m.navSearch != "" && m.navCursor == m.navSearchBase &&
+			!strings.Contains(strings.ToLower(m.words[m.navSearchBase]), strings.ToLower(m.navSearch))
+		suffix := ""
+		if noMatch {
+			suffix = "  (no results)"
+		}
+		hint = fmt.Sprintf("/%s_%s   Enter:confirm  Esc:cancel", m.navSearch, suffix)
+	} else if m.prevState == stateReading {
+		hint = "←→:word  ↑↓:line  g/G:start/end  /:search  Enter:jump here  Esc:resume"
 	} else {
-		hint = "←→:palabra  ↑↓:línea  g/G:inicio/fin  Enter:leer desde aquí  Esc:volver"
+		hint = "←→:word  ↑↓:line  g/G:start/end  /:search  Enter:read from here  Esc:back"
 	}
 	out = append(out, separator, infoStyle.Render(hint))
 
@@ -648,19 +711,19 @@ func (m model) viewReady() string {
 	const innerW = 42
 	div := dimStyle.Render(strings.Repeat("─", innerW))
 
-	wpmRow := "  " + labelStyle.Render(padRight("Velocidad:", 16)) +
+	wpmRow := "  " + labelStyle.Render(padRight("Speed:", 16)) +
 		"  " + valueStyle.Render(padRight(fmt.Sprintf("%d WPM", m.wpm), 9)) +
 		dimStyle.Render("  [ − ]  [ + ]")
 
-	sizeRow := "  " + labelStyle.Render(padRight("Tamaño fuente:", 16)) +
+	sizeRow := "  " + labelStyle.Render(padRight("Font size:", 16)) +
 		"  " + valueStyle.Render(padRight(fmt.Sprintf("%d / 5", m.fontSize), 9)) +
 		dimStyle.Render("  [ [ ]  [ ] ]")
 
-	bonusRow := "  " + labelStyle.Render(padRight("Pausa en largas:", 16)) +
+	bonusRow := "  " + labelStyle.Render(padRight("Long word bonus:", 16)) +
 		"  " + valueStyle.Render(padRight(fmt.Sprintf("%d %%", m.longWordBonus), 9)) +
 		dimStyle.Render("  [ , ]  [ . ]")
 
-	const previewWord = "ejemplo"
+	const previewWord = "example"
 	spacing := m.fontSize - 1
 	runes := []rune(previewWord)
 	orp := clamp(orpIndex(previewWord), 0, len(runes)-1)
@@ -690,15 +753,15 @@ func (m model) viewReady() string {
 		"",
 		div,
 		"",
-		centerLine(dimStyle.Render("vista previa"), innerW),
+		centerLine(dimStyle.Render("preview"), innerW),
 		"",
 		centerLine(preview, innerW),
 		"",
 		div,
 		"",
-		centerLine(startStyle.Render("[ S ]  Comenzar lectura"), innerW),
+		centerLine(startStyle.Render("[ S ]  Start reading"), innerW),
 		"",
-		centerLine(dimStyle.Render("n: navegar texto   esc: cambiar libro   q: salir"), innerW),
+		centerLine(dimStyle.Render("n: navigate text   esc: change book   q: quit"), innerW),
 		"",
 	}, "\n")
 
@@ -744,14 +807,25 @@ func (m model) viewReading() string {
 		lines[centerY+1] = guidePad + guideStyle.Render(strings.Repeat("─", half)+"┴"+strings.Repeat("─", half))
 	}
 
+	remaining := len(m.words) - m.index - 1
+	var eta string
+	if remaining > 0 {
+		secs := float64(remaining) / float64(m.wpm) * 60
+		if secs < 60 {
+			eta = fmt.Sprintf("  ~%ds", int(secs))
+		} else {
+			eta = fmt.Sprintf("  ~%dmin", int(secs/60))
+		}
+	}
+
 	var left string
 	if m.paused {
-		left = pauseStyle.Render("⏸ PAUSA") + "  " +
-			infoStyle.Render(fmt.Sprintf("%d WPM  %d/%d", m.wpm, m.index+1, len(m.words)))
+		left = pauseStyle.Render("⏸ PAUSED") + "  " +
+			infoStyle.Render(fmt.Sprintf("%d WPM  %d/%d%s", m.wpm, m.index+1, len(m.words), eta))
 	} else {
-		left = infoStyle.Render(fmt.Sprintf("▶ %d WPM  %d/%d", m.wpm, m.index+1, len(m.words)))
+		left = infoStyle.Render(fmt.Sprintf("▶ %d WPM  %d/%d%s", m.wpm, m.index+1, len(m.words), eta))
 	}
-	right := infoStyle.Render("space:pausa  ±:vel  ,/.:largas  ←→:nav  n:texto  r:config  q:salir")
+	right := infoStyle.Render("space:pause  ±:speed  ,/.:bonus  ←→:nav  n:text  r:config  q:quit")
 	gap := clamp(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1, m.width)
 	lines[m.height-1] = left + strings.Repeat(" ", gap) + right
 
@@ -764,8 +838,8 @@ func (m model) viewDone() string {
 	}
 	lines := make([]string, m.height)
 	cy := m.height / 2
-	lines[cy-1] = centerLine(doneStyle.Render("✓  Lectura completada"), m.width)
-	lines[cy+1] = centerLine(dimStyle.Render("Enter: releer   r: elegir libro   q: salir"), m.width)
+	lines[cy-1] = centerLine(doneStyle.Render("✓  Reading complete"), m.width)
+	lines[cy+1] = centerLine(dimStyle.Render("Enter: re-read   r: choose book   q: quit"), m.width)
 	return strings.Join(lines, "\n")
 }
 
@@ -803,7 +877,7 @@ func loadWords(filePath string) ([]string, error) {
 			return nil, err
 		}
 		if countWords(raw) == 0 {
-			return nil, fmt.Errorf("archivo vacío")
+			return nil, fmt.Errorf("empty file")
 		}
 		return raw, nil
 	}
@@ -830,7 +904,7 @@ func scanBooks(dir string) ([]string, error) {
 func main() {
 	books, err := scanBooks("books")
 	if err != nil || len(books) == 0 {
-		fmt.Fprintln(os.Stderr, "No se encontraron archivos .txt/.pdf/.epub en la carpeta 'books/'")
+		fmt.Fprintln(os.Stderr, "No .txt/.pdf/.epub files found in 'books/'")
 		os.Exit(1)
 	}
 

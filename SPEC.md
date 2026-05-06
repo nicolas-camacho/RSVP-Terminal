@@ -206,8 +206,22 @@ duration = base * pauseFactors[i]
 
 (empty rows)
 
-▶ 300 WPM  42/847    space:pausa  ±:vel  ←→:nav  n:texto  r:config  q:salir
+▶ 300 WPM  42/847  ~8min    space:pausa  ±:vel  ←→:nav  n:texto  r:config  q:salir
 ```
+
+### Estimated time remaining
+
+Displayed in the status bar next to the word counter. Formula:
+
+```
+remaining = totalWords - currentIndex - 1
+seconds   = remaining / wpm * 60
+
+if seconds < 60:  display "~Ns"
+else:             display "~Nmin"
+```
+
+Updates live when WPM is adjusted. Hidden when on the last word.
 
 The word is rendered at the vertical center of the screen. The ORP character is always placed at the horizontal center column. Guide lines (box-drawing characters) mark this column visually.
 
@@ -252,6 +266,24 @@ The navigator renders the full word list as wrapped text. Key behaviors:
   - `index == navCursor`: current cursor (red, underlined)
   - `index > cursor`: unread (normal grey)
 - **Navigation**: ←→ word by word; ↑↓ jumps to same column position on prev/next line (falls back to last word on shorter lines); G/g jump to end/start.
+- **Search**: press `/` to enter search mode. Characters typed are appended to the query; the cursor moves to the first matching word in real time. `Enter` confirms (exits search, cursor stays at match). `Esc` cancels (cursor returns to position before search started). `Backspace` removes the last character.
+
+### Search algorithm
+
+```
+navSearchBase = navCursor at the time "/" is pressed
+
+searchWords(words, query, from):
+  lower = lowercase(query)
+  for i from "from" to end:
+    if lowercase(words[i]) contains lower: return i
+  for i from 0 to "from"-1:              // wrap
+    if lowercase(words[i]) contains lower: return i
+  return from                            // no match, keep position
+```
+
+On each keystroke: `navCursor = searchWords(words, navSearch, navSearchBase)`.
+On `Esc`: `navCursor = navSearchBase`.
 
 ### Entry and exit
 
@@ -341,9 +373,18 @@ WPM and long word bonus are adjustable both on the config screen and during live
 | `←` `→` / `h` `l` | word by word |
 | `↑` `↓` / `k` `j` | line by line |
 | `g` / `G` | go to start / end |
-| `Enter` / `s` | start reading from cursor |
-| `Esc` | go back |
+| `/` | enter search mode |
+| `Enter` / `s` | start reading from cursor (or confirm search) |
+| `Esc` | go back (or cancel search) |
 | `q` / `Ctrl+C` | quit |
+
+**Search mode** (active after `/`):
+| Key | Action |
+|-----|--------|
+| any printable char | append to query, jump to first match |
+| `Backspace` | remove last query character |
+| `Enter` | confirm match, exit search |
+| `Esc` | cancel, restore cursor to pre-search position |
 
 ### Ready (Config)
 | Key | Action |
@@ -482,6 +523,26 @@ for i, word in words:
 
 if lineWords not empty:
   lines.append(lineWords)
+```
+
+### `searchWords(words, query, from) → int`
+```
+if query == "": return from
+lower = lowercase(query)
+for i = from to len(words)-1:
+  if lowercase(words[i]) contains lower: return i
+for i = 0 to from-1:
+  if lowercase(words[i]) contains lower: return i
+return from   // no match
+```
+
+### `timeRemaining(wpm, index, totalWords) → string`
+```
+remaining = totalWords - index - 1
+if remaining <= 0: return ""
+secs = remaining / wpm * 60
+if secs < 60: return "~" + int(secs) + "s"
+else:         return "~" + int(secs/60) + "min"
 ```
 
 ### PDF text reconstruction (per page)
